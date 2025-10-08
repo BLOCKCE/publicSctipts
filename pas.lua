@@ -1,140 +1,123 @@
--- Brute-force tester (for OWN game only). Run in Roblox Studio.
--- Configure below before running.
+-- Simple brute-force sender (OWN GAME ONLY). Run in Roblox Studio (Play Solo).
+-- Very simple: sends every combination (charset, minLen..maxLen) to ReplicatedStorage.Passcode
 
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- Required: the RemoteEvent used by your game to submit passcodes
-local PASSCODE_REMOTE = ReplicatedStorage:WaitForChild("Passcode") -- RemoteEvent (FireServer)
+local PASSCODE_REMOTE = ReplicatedStorage:WaitForChild("Passcode") -- RemoteEvent in your game
 
--- Optional: a RemoteEvent the server can use to tell the client the attempt succeeded.
--- If you don't have this, the script will still fire attempts but cannot automatically detect success.
-local PASSCODE_RESULT_REMOTE = ReplicatedStorage:FindFirstChild("PasscodeResult") -- optional RemoteEvent (OnClientEvent -> result bool, attempted string)
-
--- === Configuration ===
+-- ==== CONFIG ====
 local config = {
-    mode = "numeric",          -- "numeric" | "wordlist" | "custom"
-    attemptsPerHeartbeat = 10, -- tries per RunService.Heartbeat (tick). Reduce to be gentler.
-    throttleDelaySeconds = 0,  -- additional delay between heartbeats (0 = none)
-    maxAttempts = 100000,      -- safety cap to avoid infinite runs
-    numeric = { minLen = 1, maxLen = 4 }, -- numeric mode: test 0..9^len-1 with zero padding
-    wordlist = {               -- wordlist mode: put the words you want to try here (small example)
-        "1234","0000","password","pass","dadwad","letmein"
-    },
-    customGenerator = nil      -- optional function() -> iterator function() that returns next string or nil
+    charset = { "0","1","2","3","4","5","6","7","8","9" }, -- characters to use
+    minLen = 1,
+    maxLen = 4,
+    attemptsPerHeartbeat = 50, -- how many sends per Heartbeat (tick). Reduce if needed.
+    maxAttempts = 1000000,     -- overall cap (safety)
 }
--- =======================
+-- ================
 
--- Safety checks
-if config.attemptsPerHeartbeat <= 0 then config.attemptsPerHeartbeat = 1 end
-if config.maxAttempts <= 0 then config.maxAttempts = math.huge end
+-- basic sanity
+if config.minLen < 1 then config.minLen = 1 end
+if config.maxLen < config.minLen then config.maxLen = config.minLen end
+if config.attemptsPerHeartbeat < 1 then config.attemptsPerHeartbeat = 1 end
 
-local running = true
+local charset = config.charset
+local base = #charset
+
+-- generator state: current length and index array representing base-N number
+local curLen = config.minLen
+local indices = {} -- 1-based indices into charset, store 1..base
+for i = 1, curLen do indices[i] = 1 end
+
 local attempts = 0
+local running = true
 
--- Optional handler to stop when server signals success
-if PASSCODE_RESULT_REMOTE then
-    PASSCODE_RESULT_REMOTE.OnClientEvent:Connect(function(success, attempted)
+-- helper: build string from indices
+local function buildFromIndices()
+    local parts = {}
+    for i = 1, #indices do
+        parts[i] = charset[indices[i]]
+    end
+    return table.concat(parts)
+end
+
+-- helper: advance indices like a base-N counter; returns true if we produced a new combo, false if exhausted
+local function advance()
+    -- increment least-significant position (rightmost, index #indices)
+    local pos = #indices
+    while pos >= 1 do
+        indices[pos] = indices[pos] + 1
+        if indices[pos] <= base then
+            return true
+        else
+            -- carry
+            indices[pos] = 1
+            pos = pos - 1
+        end
+    end
+
+    -- if we carried past the most significant digit, increase length if allowed
+    if curLen < config.maxLen then
+        curLen = curLen + 1
+        indices = {}
+        for i = 1, curLen do indices[i] = 1 end
+        return true
+    end
+
+    -- exhausted
+    return false
+end
+
+-- Optional: if you add a PasscodeResult RemoteEvent on server that fires (success, attempted),
+-- it can tell the client to stop. If not present, this script will keep going until exhausted or maxAttempts.
+local PASSCODE_RESULT = ReplicatedStorage:FindFirstChild("PasscodeResult")
+if PASSCODE_RESULT then
+    PASSCODE_RESULT.OnClientEvent:Connect(function(success, attempted)
         if success then
-            print(("Server reported success for password: %s"):format(tostring(attempted)))
+            print("Server reported success for:", tostring(attempted))
             running = false
         end
     end)
 end
 
--- Generator builders
-local function makeNumericGenerator(minLen, maxLen)
-    -- returns function() -> nextPassword or nil when finished
-    local length = minLen
-    local current = 0
-    local maxForLen = function(len) return 10^len - 1 end
-
-    return function()
-        while length <= maxLen do
-            if current > maxForLen(length) then
-                length = length + 1
-                current = 0
-            else
-                local s = tostring(current)
-                if #s < length then
-                    s = string.rep("0", length - #s) .. s
-                end
-                current = current + 1
-                return s
-            end
-        end
-        return nil
-    end
-end
-
-local function makeWordlistGenerator(list)
-    local i = 0
-    return function()
-        i = i + 1
-        return list[i]
-    end
-end
-
-local function makeCustomGenerator(fn)
-    -- fn should return an iterator function() -> nextString or nil
-    return fn and fn() or function() return nil end
-end
-
--- Set up the generator based on chosen mode
-local generator
-if config.mode == "numeric" then
-    generator = makeNumericGenerator(config.numeric.minLen, config.numeric.maxLen)
-elseif config.mode == "wordlist" then
-    generator = makeWordlistGenerator(config.wordlist)
-elseif config.mode == "custom" then
-    if type(config.customGenerator) == "function" then
-        generator = makeCustomGenerator(config.customGenerator)
-    else
-        error("custom mode requires config.customGenerator to be a function that returns an iterator")
-    end
-else
-    error("Unknown mode in config.mode")
-end
-
--- Core attempt loop: uses Heartbeat so it runs once per frame (attemptsPerHeartbeat per frame)
-local heartbeatConn
-heartbeatConn = RunService.Heartbeat:Connect(function(dt)
+-- send loop on Heartbeat
+local hbConn
+hbConn = RunService.Heartbeat:Connect(function()
     if not running then
-        heartbeatConn:Disconnect()
-        print("Stopped brute-force tester.")
+        hbConn:Disconnect()
+        print("Stopped.")
         return
     end
 
     for i = 1, config.attemptsPerHeartbeat do
         if not running then break end
         if attempts >= config.maxAttempts then
-            print(("Reached maxAttempts (%d). Stopping."):format(config.maxAttempts))
+            print("Reached maxAttempts cap. Stopping.")
             running = false
             break
         end
 
-        local pwd = generator()
-        if not pwd then
-            print("Generator exhausted — no more passwords to try.")
-            running = false
-            break
-        end
-
-        -- Fire the passcode RemoteEvent. Passing a single argument (password).
-        -- If your game expects a different arg shape, change this line accordingly.
-        pcall(function()
-            PASSCODE_REMOTE:FireServer(pwd)
+        local candidate = buildFromIndices()
+        -- Fire to the server. Wrap in pcall to avoid script-breaking errors.
+        local success, err = pcall(function()
+            PASSCODE_REMOTE:FireServer(candidate)
         end)
+        if not success then
+            warn("Failed to FireServer:", err)
+        end
 
         attempts = attempts + 1
-        if attempts % 100 == 0 then
-            print(("Attempts: %d (latest: %s)"):format(attempts, tostring(pwd)))
+        if attempts % 1000 == 0 then
+            print(string.format("Attempts: %d (latest: %s)", attempts, candidate))
         end
-    end
 
-    if config.throttleDelaySeconds > 0 then
-        wait(config.throttleDelaySeconds)
+        -- advance to next combo; if none left, stop
+        if not advance() then
+            print("Generator exhausted. Done.")
+            running = false
+            break
+        end
     end
 end)
 
-print("Brute-force tester started. mode=", config.mode, " attemptsPerHeartbeat=", config.attemptsPerHeartbeat)
+print("Brute-force sender started. Charset size:", base, "minLen:", config.minLen, "maxLen:", config.maxLen)
