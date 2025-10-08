@@ -5,7 +5,7 @@ local PASSCODE_REMOTE = ReplicatedStorage:WaitForChild("Passcode") -- RemoteEven
 
 -- ===== CONFIG =====
 local LENGTH = 6                       -- fixed length to test
-local attemptsPerHeartbeat = 50        -- how many FireServer calls per Heartbeat (lower = gentler)
+local attemptsPerHeartbeat = 1000        -- how many FireServer calls per Heartbeat (lower = gentler)
 local maxAttempts = 5000000            -- absolute cap (set to a safe number during development)
 -- charset: lower, upper, digits, and common symbols (includes . ! - and others)
 local charset = {}
